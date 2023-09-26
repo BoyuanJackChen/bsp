@@ -3,6 +3,8 @@ import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import torch
 import argparse
+import time
+import random
 
 class SpeculativeGenerationModel:
     def __init__(self, model, assist_model, tokenizer, device='cuda'):
@@ -37,6 +39,7 @@ class SpeculativeGenerationModel:
 
     @torch.inference_mode()
     def generate(self, prompts:List[str], specualtive_step:int, num_out:int):
+        tokenizer.padding_side='right'
         token_seqs = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
         batch_size = len(prompts)
         assist_kv_cache = None
@@ -81,16 +84,42 @@ class SpeculativeGenerationModel:
             ret.append(self.tokenizer.decode(tokens, skip_special_tokens=True))
         return ret
 
-# def measure_time(, )
+def benchmark(fn, num=1, warmup=3, ground_truth=None):
+    for _ in range(warmup):
+        out = fn()
+    torch.cuda.synchronize()
+    start_t = time.time()
+    for _ in range(num):
+        out = fn()
+    torch.cuda.synchronize()
+    dur = (time.time() - start_t) / num
+    if ground_truth is not None:
+        assert out == ground_truth
+    return dur
 
 @torch.inference_mode()
 def generate_hf(prompts, model, tokenizer, step):
-    gen_conf = GenerationConfig(max_new_tokens=step, min_new_tokens=step, eos_token_id=tokenizer.eos_token_id)
+    tokenizer.padding_side='left'
+    gen_conf = GenerationConfig(max_new_tokens=step, min_new_tokens=step, eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.eos_token_id)
     token_seqs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
     token_seqs = token_seqs.to('cuda')
     model = model.to('cuda')
     out = model.generate(**token_seqs, generation_config=gen_conf)
     return tokenizer.batch_decode(out, skip_special_tokens=True)
+
+@torch.inference_mode()
+def generate_hf_assist(prompts, model, assist_model, tokenizer, step):
+    tokenizer.padding_side='left'
+    gen_conf = GenerationConfig(max_new_tokens=step, min_new_tokens=step, eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.eos_token_id)
+    ret = []
+    for p in prompts:
+        token_seqs = tokenizer(p, return_tensors="pt")
+        # print(token_seqs)
+        token_seqs = token_seqs.to('cuda')
+        model = model.to('cuda')
+        out = model.generate(**token_seqs, generation_config=gen_conf, assistant_model=assist_model)
+        ret.append(tokenizer.decode(out[0], skip_special_tokens=True))
+    return ret
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -99,36 +128,28 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer', type=str)
     parser.add_argument('--step', type=int)
     parser.add_argument('--num-out', type=int)
+    parser.add_argument('--batch-size', type=int, default=3)
+    parser.add_argument('--print', action='store_true')
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.model).half().cuda()
     assist_model = AutoModelForCausalLM.from_pretrained(args.assist_model).half().cuda()
+    assist_model.max_assistant_tokens = args.step
 
-    import time
-    prompts = ["The University of Toronto is", "The city of Toronto is", "Canada is"]
+    prompts = random.choices(["The University of Toronto is", "The city of Toronto is", "Canada is"], k=args.batch_size)
     generator = SpeculativeGenerationModel(model, assist_model, tokenizer)
-    # warm up
-    generator.generate(prompts, args.step, args.num_out)
-
-    torch.cuda.synchronize()
-    start_t = time.time()
-    spec_out = generator.generate(prompts, args.step, args.num_out)
-    torch.cuda.synchronize()
-    print("speculative:", time.time() - start_t)
-
-    tokenizer.padding_side='left'
-    generate_hf(prompts, model, tokenizer, args.num_out)
-    torch.cuda.synchronize()
-    start_t = time.time()
     ground_truth = generate_hf(prompts, model, tokenizer, args.num_out)
-    torch.cuda.synchronize()
-    print("baseline:", time.time() - start_t)
-
-    for a, b in zip(spec_out, ground_truth):
-        print('='*10)
-        print(a)
-        print('-'*10)
-        print(b)
-    assert(spec_out == ground_truth)
+    output = generator.generate(prompts, args.step, args.num_out)
+    # print(ground_truth)
+    print("baseline:", benchmark(lambda: generate_hf(prompts, model, tokenizer, args.num_out)))
+    # print("speculative:", benchmark(lambda: generate_hf_assist(prompts, model, assist_model, tokenizer, args.num_out)))
+    print("batched speculative:", benchmark(lambda : generator.generate(prompts, args.step, args.num_out), ground_truth=ground_truth))
+    
+    if args.print:
+        for a, b in zip(ground_truth, output):
+            print('='*10)
+            print(a)
+            print('-'*10)
+            print(b)
