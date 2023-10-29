@@ -96,10 +96,7 @@ if __name__ == '__main__':
                 t, ret = benchmark(lambda p: generate_hf(p, model, tokenizer, args.len_out), prompts, batch_size)
             else:
                 t, ret = benchmark(lambda p: generator.generate(p, args.len_out, collect_stats=args.collect_stats), prompts, batch_size)
-            # print("num sequences:", len(ret_sp))
             num_tokens = len(ret) * args.len_out
-            # print("num tokens:", num_tokens)
-            # print(f"baseline: {t_hf / num_tokens :.4f} sec/token")
             print(f"{batch_size}, {speculate_step}, {t / num_tokens}")
             
             if args.collect_stats:

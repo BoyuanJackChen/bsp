@@ -11,16 +11,16 @@ def _run_and_timing(fn):
     return ret, dur
 
 class SpeculativeGenerationModel:
-    def __init__(self, model, assist_model, tokenizer, specualtive_step, device='cuda'):
+    def __init__(self, model, assist_model, tokenizer, specualtive_step=1, device='cuda'):
         self.model = model.to(device)
         self.assist_model = assist_model.to(device)
         self.tokenizer = tokenizer
         self.device=device
 
-        self.specualtive_step = specualtive_step
+        self.specualtive_step = 1 if specualtive_step is None else specualtive_step
 
         # stats
-        self.pos_correct = torch.zeros([specualtive_step], device=device)
+        self.pos_correct = torch.zeros([self.specualtive_step], device=device)
         self.pos_cnt = 0
 
         self.time_speculate = 0
@@ -52,8 +52,8 @@ class SpeculativeGenerationModel:
         return torch.cat([mask, torch.ones([mask.shape[0], 1], device=self.device, dtype=torch.int32)], axis=1)
 
     @torch.inference_mode()
-    def generate(self, prompts:List[str], num_out:int, collect_stats=False):
-        specualtive_step = self.specualtive_step
+    def generate(self, prompts:List[str], num_out:int, collect_stats=False, specualtive_step=None):
+        specualtive_step = self.specualtive_step if specualtive_step is None else specualtive_step
         self.tokenizer.padding_side='right'
         token_seqs = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
         batch_size = len(prompts)
@@ -78,22 +78,13 @@ class SpeculativeGenerationModel:
             (speculated_tokens, attention_mask, assist_kv_cache), t_spec = _run_and_timing(lambda: self._speculative(input_ids, attention_mask, assist_kv_cache, specualtive_step))
             self.time_speculate += t_spec
             # verify
-            speculated_tokens = torch.tensor(speculated_tokens, device=self.device)
+            speculated_tokens = torch.tensor(speculated_tokens, device=self.device, dtype=torch.int64)
             verify_inputs = torch.cat([first_token, speculated_tokens], axis=1)
-            # print(kv_cache[0][0].shape[2], attention_mask.shape)
             ret, t_verify = _run_and_timing(lambda: self.model(verify_inputs, attention_mask=attention_mask, use_cache=True, past_key_values=kv_cache))
             self.time_verify += t_verify
             self.verify_calls += 1
             logits = ret.logits
             kv_cache = ret.past_key_values
-            # new_kv = []
-            # for i in range(len(kv_cache)):
-            #     kv_line = []
-            #     for j in range(len(kv_cache[i])):
-            #         # print(kv_cache[i][j].shape, generated_kv[i][j].shape)
-            #         kv_line.append(torch.concat([kv_cache[i][j], generated_kv[i][j]], dim=2))
-            #     new_kv.append(kv_line)
-            # kv_cache = new_kv
             correct = logits[:, :-1].argmax(dim=2)
 
             # mask wrong predictions
