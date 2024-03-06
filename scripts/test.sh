@@ -7,5 +7,5 @@ python scripts/benchmark.py \
        --batch-size 1 2 4 8 16 32\
        --fp16 \
        --dataset alespalla/chatbot_instruction_prompts \
-       --dataset-truncate 200 \
+       --dataset-truncate 3 \
        # --collect-stats

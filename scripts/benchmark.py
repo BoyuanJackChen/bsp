@@ -4,6 +4,7 @@ import time
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from datasets import load_dataset
 # import deepspeed
 # from optimum.bettertransformer import BetterTransformer
 
@@ -35,7 +36,6 @@ def generate_hf_assist(prompts, model, assist_model, tokenizer, step):
     return ret
 
 def get_dataset(dataset_name, truncate = None):
-    from datasets import load_dataset
     if dataset_name == 'alespalla/chatbot_instruction_prompts':
         dataset = load_dataset(dataset_name)
         dataset = [t['prompt'] for t in dataset['test']]
@@ -74,23 +74,25 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(args)
 
+    # Initialized the two models
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.model)
     # model = deepspeed.init_inference(model, replace_with_kernel_inject=True)
     # model = BetterTransformer.transform(model)
-
     assist_model = AutoModelForCausalLM.from_pretrained(args.assist_model)
-    prompts = get_dataset(args.dataset, args.dataset_truncate)
     if args.fp16:
         model.half()
         assist_model.half()
     model.cuda()
     assist_model.cuda()
+
+    prompts = get_dataset(args.dataset, args.dataset_truncate)
+
     print("batch size, speculate step, sec/token")
     for batch_size in args.batch_sizes:
         for speculate_step in args.speculate_steps:
-            assist_model.max_assistant_tokens = speculate_step
+            assist_model.max_assistant_tokens = speculate_step   # What is this parameter???
             generator = SpeculativeGenerationModel(model, assist_model, tokenizer, speculate_step)
             if speculate_step == 0:
                 t, ret = benchmark(lambda p: generate_hf(p, model, tokenizer, args.len_out), prompts, batch_size)
