@@ -5,12 +5,24 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset
-# import deepspeed
-# from optimum.bettertransformer import BetterTransformer
+from human_eval.data import read_problems
 
 from tqdm import tqdm
 
 from bsp.generator import SpeculativeGenerationModel
+
+fixed_starter = "Here's the Python script for the given problem:\n\n```python\n"
+fixed_starter_ids_sc = [10921, 1182, 322, 4865, 3261, 436, 322, 3708, 44, 553, 203, 914, 2958, 206, 203]
+def alpaca_prompt(input):
+    INSTRUCTION = f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+
+### Instruction:
+Create a Python script for this problem:
+{input}
+
+### Response:"""
+    return INSTRUCTION
 
 @torch.inference_mode()
 def generate_hf(prompts, model, tokenizer, step):
@@ -36,13 +48,26 @@ def generate_hf_assist(prompts, model, assist_model, tokenizer, step):
     return ret
 
 def get_dataset(dataset_name, truncate = None):
+    dataset = []
     if dataset_name == 'alespalla/chatbot_instruction_prompts':
         dataset = load_dataset(dataset_name)
         dataset = [t['prompt'] for t in dataset['test']]
         if truncate is not None:
             return dataset[:truncate]
+    elif dataset_name == 'human-eval' or dataset_name == 'HumanEval' or dataset_name == 'humaneval':
+        dataset = read_problems()
+        prompt_dataset = []
+        for k in range(0,164):
+            original_prompt = dataset[f"HumanEval/{k}"]['prompt']
+            prompt = alpaca_prompt(original_prompt) + fixed_starter + original_prompt
+            # prompt = alpaca_prompt(original_prompt)
+            prompt_dataset.append(prompt)
+        dataset = prompt_dataset
+        if truncate is not None:
+            return dataset[:truncate]
     else:
         raise ValueError("Unsupported dataset")
+    return dataset
 
 def benchmark(gen_fn, prompts, batch_size, warmup=3):
     for _ in range(warmup):
@@ -74,7 +99,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(args)
 
+    # load dataset
+    prompts = get_dataset(args.dataset, args.dataset_truncate)
+
     # Initialized the two models
+    print(f"Loading models...")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.model)
@@ -87,19 +116,21 @@ if __name__ == '__main__':
     model.cuda()
     assist_model.cuda()
 
-    prompts = get_dataset(args.dataset, args.dataset_truncate)
 
-    print("batch size, speculate step, sec/token")
+    print(f"All batch sizes: {args.batch_sizes}; all speculate steps: {args.speculate_steps}")
     for batch_size in args.batch_sizes:
         for speculate_step in args.speculate_steps:
-            assist_model.max_assistant_tokens = speculate_step   # What is this parameter???
+            assist_model.max_assistant_tokens = speculate_step
             generator = SpeculativeGenerationModel(model, assist_model, tokenizer, speculate_step)
             if speculate_step == 0:
                 t, ret = benchmark(lambda p: generate_hf(p, model, tokenizer, args.len_out), prompts, batch_size)
             else:
                 t, ret = benchmark(lambda p: generator.generate(p, args.len_out, collect_stats=args.collect_stats), prompts, batch_size)
             num_tokens = len(ret) * args.len_out
-            print(f"{batch_size}, {speculate_step}, {t / num_tokens}")
+            print(f"\nBatch size: {batch_size}, Spec step: {speculate_step}, total time: {t}s, Time per token: {t / num_tokens}")
+            for answer in ret:
+                print(answer)
+                input()
             
             if args.collect_stats:
                 hit_rate, time_speculate, time_verify, verify_calls = generator.get_stats()
